@@ -262,6 +262,7 @@ canvas#plan2d{display:none;cursor:default}
   <div class="toolbar">
     <div class="seg"><button id="v3d" class="on">3D</button><button id="v2d">Floor plan</button><button id="vTop">Top</button></div>
     <div class="seg"><button id="gridBtn" class="on">Grid</button><button id="snapBtn" class="on">Snap</button><button id="labelBtn" class="on">Labels</button></div>
+    <button id="roofToggleBtn" aria-pressed="true" title="Show or hide the roof">Roof: Shown</button>
     <button id="fitBtn">⤢ Fit</button>
     <div class="sp"></div>
     <button id="playBtn" class="primary">▶ Walk through</button>
@@ -386,6 +387,10 @@ const PAL={grass:[[72,116,62],[132,170,92]],sand:[[190,168,120],[226,208,156]],s
 function blank(){return{name:'Untitled house',site:{width:26,depth:28,ground:0,hills:.8,scale:1,seed:3,material:'grass',wall:2.8,roof:'off',wallColor:'#ebe6dc',roofColor:'#41546d'},river:{pts:[],width:3,depth:.5},env:{hour:12.5,weather:'clear',flood:.6,quake:'moderate',sim:false},rooms:[],objects:[],blueprints:[],nextId:1,nextBpId:1}}
 let S=blank();
 let sel=null,view='3d',showGrid=true,snapOn=true,showLabels=true,riverMode=false,playMode=false,drag=null,nudgeTimer=null,quakeUntil=0,flash=0,lastT=0,planCache=null;
+// Each view starts with its own default roof visibility: 3D shows it; Top hides it.
+// The user can override the current view, and the override resets on view change.
+let roofOverride=null;
+const roofMeshes=[];
 const bpImages=new Map(); // id -> HTMLImageElement (runtime cache, not serialized)
 let renderer,scene,camera,world,sun,moon,hemi,stars,rain,stage,stageGrid,selBox,floodMesh,raycaster,skyTex=null,baseHemi=1;
 const glassMats=new Set();let matCache=new Map();
@@ -432,11 +437,12 @@ function init3D(){
  rain=new THREE.Points(rg,new THREE.PointsMaterial({color:0xaed4ff,size:.09,transparent:true,opacity:.7}));rain.visible=false;scene.add(rain);
  world=new THREE.Group();scene.add(world);raycaster=new THREE.Raycaster();
  resize();fitCamera();rebuild();animate(0)}
-function clearWorld(){if(!world)return;world.traverse(n=>{if(n.geometry)n.geometry.dispose();if(n.isSprite){n.material.map?.dispose();n.material.dispose()}});matCache.forEach(m=>m.dispose());matCache.clear();glassMats.clear();world.clear();floodMesh=null;if(selBox){scene.remove(selBox);selBox.geometry.dispose();selBox=null}}
+function clearWorld(){if(!world)return;world.traverse(n=>{if(n.geometry)n.geometry.dispose();if(n.isSprite){n.material.map?.dispose();n.material.dispose()}});matCache.forEach(m=>m.dispose());matCache.clear();glassMats.clear();roofMeshes.length=0;world.clear();floodMesh=null;if(selBox){scene.remove(selBox);selBox.geometry.dispose();selBox=null}}
 function makeLabel(text){const c=document.createElement('canvas');c.width=512;c.height=96;const x=c.getContext('2d');x.fillStyle='rgba(10,16,24,.82)';x.beginPath();x.roundRect?x.roundRect(6,10,500,76,38):x.rect(6,10,500,76);x.fill();x.strokeStyle='#f2b84b';x.lineWidth=3;x.stroke();x.fillStyle='#f4f7fb';x.font='600 36px Inter,system-ui,sans-serif';x.textAlign='center';x.textBaseline='middle';x.fillText(text,256,50,470);const tex=new THREE.CanvasTexture(c);tex.colorSpace=THREE.SRGBColorSpace;const s=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false,fog:false}));s.scale.set(3.4,.64,1);s.renderOrder=10;return s}
 function rebuild(){
- planCache=null;updateSummary();if(!scene){draw2D();return}
+ planCache=null;updateSummary();if(!scene){updateRoofVisibility();draw2D();return}
  clearWorld();buildTerrain();buildRiver();S.rooms.forEach(buildRoom);S.objects.forEach(buildObject);buildFlood();
+ updateRoofVisibility();
  const m=Math.max(S.site.width,S.site.depth)*.8;const c=sun.shadow.camera;c.left=-m;c.right=m;c.top=m;c.bottom=-m;c.near=1;c.far=160;c.updateProjectionMatrix();
  const base=baseY();stage.position.y=base-.05;stageGrid.position.y=base-.04;
  applyEnv();applySelection3D();draw2D()}
@@ -469,8 +475,8 @@ function buildRoom(r){
  for(const sd of sides){const L=sd.L,sh=new THREE.Shape();sh.moveTo(-L/2,0);sh.lineTo(L/2,0);sh.lineTo(L/2,wh);sh.lineTo(-L/2,wh);sh.closePath();
   let last=-L/2+.05;for(const op of openingsOnWall(r,sd)){const u0=clamp(op.u-op.w/2,-L/2+.1,L/2-.1),u1=clamp(op.u+op.w/2,-L/2+.1,L/2-.1),y0=clamp(op.e,.02,wh-.3),y1=Math.min(wh-.05,y0+op.h);if(u1-u0<.2||y1-y0<.2||u0<last+.05)continue;last=u1;const h=new THREE.Path();h.moveTo(u0,y0);h.lineTo(u1,y0);h.lineTo(u1,y1);h.lineTo(u0,y1);h.closePath();sh.holes.push(h)}
   const geo=new THREE.ExtrudeGeometry(sh,{depth:T,bevelEnabled:false});geo.translate(0,0,-T/2);const m=new THREE.Mesh(geo,wm);m.castShadow=m.receiveShadow=true;m.position.set(sd.horiz?0:sd.off,FLOOR,sd.horiz?sd.off:0);m.rotation.y=sd.horiz?0:Math.PI/2;g.add(m)}
- if(S.site.roof==='flat'){const m=new THREE.Mesh(new THREE.BoxGeometry(r.w+.5,.2,r.d+.5),mat(S.site.roofColor,{r:.8}));m.position.y=FLOOR+wh+.1;m.castShadow=m.receiveShadow=true;g.add(m)}
- else if(S.site.roof==='gable'){const rx=r.w>=r.d,span=(rx?r.d:r.w)+.7,len=(rx?r.w:r.d)+.7,rise=span*.26,sh=new THREE.Shape();sh.moveTo(-span/2,0);sh.lineTo(span/2,0);sh.lineTo(0,rise);sh.closePath();const geo=new THREE.ExtrudeGeometry(sh,{depth:len,bevelEnabled:false});geo.translate(0,0,-len/2);const m=new THREE.Mesh(geo,mat(S.site.roofColor,{r:.8}));m.rotation.y=rx?Math.PI/2:0;m.position.y=FLOOR+wh;m.castShadow=m.receiveShadow=true;g.add(m)}
+ if(S.site.roof==='flat'){const m=new THREE.Mesh(new THREE.BoxGeometry(r.w+.5,.2,r.d+.5),mat(S.site.roofColor,{r:.8}));m.position.y=FLOOR+wh+.1;m.castShadow=m.receiveShadow=true;m.userData.isRoof=true;roofMeshes.push(m);g.add(m)}
+ else if(S.site.roof==='gable'){const rx=r.w>=r.d,span=(rx?r.d:r.w)+.7,len=(rx?r.w:r.d)+.7,rise=span*.26,sh=new THREE.Shape();sh.moveTo(-span/2,0);sh.lineTo(span/2,0);sh.lineTo(0,rise);sh.closePath();const geo=new THREE.ExtrudeGeometry(sh,{depth:len,bevelEnabled:false});geo.translate(0,0,-len/2);const m=new THREE.Mesh(geo,mat(S.site.roofColor,{r:.8}));m.rotation.y=rx?Math.PI/2:0;m.position.y=FLOOR+wh;m.castShadow=m.receiveShadow=true;m.userData.isRoof=true;roofMeshes.push(m);g.add(m)}
  world.add(g);
  if(showLabels){const lb=makeLabel(r.name);lb.position.set(r.x,pad+FLOOR+wh+.7,r.z);lb.userData.labelFor=r.id;world.add(lb)}}
 function buildModel(o){
@@ -674,12 +680,28 @@ cv3.addEventListener('pointerup',end3D);cv3.addEventListener('pointercancel',end
 cv3.addEventListener('wheel',e=>{e.preventDefault();if(playMode)return;cam.dist=clamp(cam.dist*(e.deltaY>0?1.08:.92),6,140);updateCam()},{passive:false});
 document.addEventListener('pointerlockchange',()=>{if(playMode&&document.pointerLockElement!==cv3&&!drag)exitPlay()});
 
+/* ---------- roof visibility ---------- */
+function updateRoofVisibility(){
+ const configured=S.site.roof!=='off';
+ const modeSupported=view==='3d'||view==='top';
+ const visible=configured&&modeSupported&&(roofOverride===null?view==='3d':roofOverride);
+ roofMeshes.forEach(mesh=>mesh.visible=visible);
+ const button=$('roofToggleBtn');
+ button.disabled=!configured||!modeSupported;
+ button.classList.toggle('on',visible);
+ button.setAttribute('aria-pressed',String(visible));
+ button.textContent=visible?'Roof: Shown':'Roof: Hidden';
+ button.title=!configured?'Choose Flat roof or Gable roof in Site → Building first':
+  !modeSupported?'Roof toggle is available in 3D and Top views':
+  `Click to ${visible?'hide':'show'} the roof in ${view==='top'?'Top':'3D'} view`;
+}
+
 /* ---------- views ---------- */
-function setView(v){if(playMode&&v!==view)exitPlay();view=v;const is2=v==='2d';cv3.style.display=is2?'none':'block';plan.style.display=is2?'block':'none';$('coords').style.display='none';
+function setView(v){if(playMode&&v!==view)exitPlay();if(v!==view)roofOverride=null;view=v;const is2=v==='2d';cv3.style.display=is2?'none':'block';plan.style.display=is2?'block':'none';$('coords').style.display='none';
  ['3d','2d','Top'].forEach(k=>$('v'+k).classList.toggle('on',(k==='3d'&&v==='3d')||(k==='2d'&&v==='2d')||(k==='Top'&&v==='top')));
  $('viewTitle').textContent=v==='3d'?'3D model':v==='2d'?'Floor plan':'Top view';
  $('hint').textContent=is2?'Drag to move · corner handle resizes a room · drag empty space or right-drag to pan · scroll to zoom':'Drag items to move · drag empty space to orbit · Shift/right-drag to pan · scroll to zoom';
- if(v==='top')fitCamera(true);else if(v==='3d'&&!playMode)fitCamera();if(is2){fit2D();draw2D()}}
+ if(v==='top')fitCamera(true);else if(v==='3d'&&!playMode)fitCamera();if(is2){fit2D();draw2D()}updateRoofVisibility()}
 
 /* ---------- UI ---------- */
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>t.classList.remove('show'),2300)}
@@ -701,6 +723,7 @@ $('v3d').onclick=()=>setView('3d');$('v2d').onclick=()=>setView('2d');$('vTop').
 $('gridBtn').onclick=()=>{showGrid=!showGrid;$('gridBtn').classList.toggle('on',showGrid);if(stageGrid)stageGrid.visible=showGrid;draw2D()};
 $('snapBtn').onclick=()=>{snapOn=!snapOn;$('snapBtn').classList.toggle('on',snapOn);toast('Snap '+(snapOn?'on (0.25 m grid, wall & edge snapping)':'off'))};
 $('labelBtn').onclick=()=>{showLabels=!showLabels;$('labelBtn').classList.toggle('on',showLabels);rebuild()};
+$('roofToggleBtn').onclick=()=>{if(S.site.roof==='off'||view==='2d')return;const currentlyVisible=roofOverride===null?view==='3d':roofOverride;roofOverride=!currentlyVisible;updateRoofVisibility()};
 $('fitBtn').onclick=()=>{if(view==='2d'){fit2D();draw2D()}else fitCamera(view==='top')};
 $('playBtn').onclick=()=>playMode?exitPlay():enterPlay();
 $('undoBtn').onclick=undo;$('redoBtn').onclick=redo;
