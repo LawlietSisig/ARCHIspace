@@ -1,0 +1,17 @@
+# Environment and database credentials
+.env
+.env.*
+!.env.example
+config.local.php
+
+# Dependencies
+/vendor/
+/node_modules/
+
+# Logs and backups
+*.log
+/backups/
+
+# Editor files
+.idea/
+.vscode/
